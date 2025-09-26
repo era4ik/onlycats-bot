@@ -1,6 +1,8 @@
 import logging
 import os
 import json
+from threading import Thread
+
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -8,15 +10,31 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     filters, ContextTypes, ConversationHandler
 )
+from flask import Flask
 
-# 🔑 Telegram Bot Token и Channel ID
+# -------------------------------
+# Flask Web Server для Render
+# -------------------------------
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Bot is running!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+
+# -------------------------------
+# Telegram Bot & Google Sheets
+# -------------------------------
+
 BOT_TOKEN = "8187567616:AAG_1VuKg5W_fQgAfZHOSMDxxHTzr105Das"
 CHANNEL_ID = "-1002756706595"
 ADMIN_ID = 7085368976  # <-- твой Telegram ID
 
-# 🔑 Google Sheets Setup через Render Env Var GOOGLE_CREDS
 SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds_json = os.getenv("GOOGLE_CREDS")  # JSON берём из переменной окружения Render
+creds_json = os.getenv("GOOGLE_CREDS")
 if not creds_json:
     raise Exception("❌ GOOGLE_CREDS переменная окружения не найдена!")
 
@@ -25,17 +43,20 @@ CREDS = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
 client = gspread.authorize(CREDS)
 sheet = client.open("Onlycats Applications").sheet1
 
-# 📝 Логирование
+# Logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# 🗂️ Состояния анкеты
+# States
 (Q1, Q2, Q3, Q4, Q5, Q6, Q7, Q8, Q9, Q10, Q11, Q12) = range(12)
 
-# 🚀 Старт анкеты
+# -------------------------------
+# Conversation Handlers
+# -------------------------------
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Как к тебе обращаться?")
     return Q1
@@ -79,8 +100,10 @@ async def q6(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def q7(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["english"] = update.message.text
-    await update.message.reply_text("Фанат пишет: “I can find free stuff online. Why should I pay you?” — твой ответ?",
-                                    reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text(
+        "Фанат пишет: “I can find free stuff online. Why should I pay you?” — твой ответ?",
+        reply_markup=ReplyKeyboardRemove()
+    )
     return Q8
 
 async def q8(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -108,7 +131,6 @@ async def q11(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def q12(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["q12"] = update.message.text
-
     username = update.message.from_user.username or "(no username)"
     user_id = update.message.from_user.id
 
@@ -131,8 +153,6 @@ async def q12(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await context.bot.send_message(chat_id=CHANNEL_ID, text=result_message)
-
-    # Сохраняем в Google Sheets
     sheet.append_row([
         username, str(user_id),
         context.user_data["name"],
@@ -148,16 +168,15 @@ async def q12(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["q11"],
         context.user_data["q12"]
     ])
-
     await update.message.reply_text("Спасибо за заявку, анкета отправлена.")
     return ConversationHandler.END
 
-# ❌ Отмена анкеты
+# Отмена
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Анкета отменена.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
-# 📢 Команда рассылки
+# Рассылка
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ У тебя нет прав для рассылки.")
@@ -168,9 +187,8 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text_to_send = " ".join(context.args)
-    users = sheet.col_values(2)  # колонка user_id
+    users = sheet.col_values(2)
     sent, failed = 0, 0
-
     for user_id in users[1:]:
         try:
             await context.bot.send_message(chat_id=int(user_id), text=text_to_send)
@@ -181,8 +199,10 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"✅ Рассылка завершена.\nОтправлено: {sent}\nОшибок: {failed}")
 
-# ▶️ Main
-if __name__ == "__main__":
+# -------------------------------
+# Main
+# -------------------------------
+def run_bot():
     print("🚀 Бот запущен и работает...")
 
     application = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -208,5 +228,13 @@ if __name__ == "__main__":
 
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler("broadcast", broadcast))
-
     application.run_polling()
+
+if __name__ == "__main__":
+    # Запуск Flask в отдельном потоке
+    from threading import Thread
+    flask_thread = Thread(target=run_flask)
+    flask_thread.start()
+
+    # Запуск Telegram бота
+    run_bot()
